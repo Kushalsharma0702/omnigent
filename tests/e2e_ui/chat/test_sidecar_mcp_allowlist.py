@@ -153,16 +153,19 @@ def _create_sidecar_allowlist_session(
     return session_id
 
 
-def _advertised_tool_names(mock_url: str) -> set[str]:
+def _advertised_tool_names(mock_url: str, model: str) -> set[str]:
     """Collect every tool name the harness advertised to the model.
 
     Reads the captured request bodies from the mock LLM and unions the
-    ``name`` of each entry in every request's ``tools`` array.
+    ``name`` of each entry in every request's ``tools`` array. Captures
+    are filtered to this test's unique ``model`` key so requests from
+    other tests sharing the session-scoped mock cannot leak in.
 
     :param mock_url: Mock LLM base URL.
+    :param model: Unique model id baked into this test's spec.
     :returns: Set of advertised tool names (namespaced, e.g. ``probe__echo``).
     """
-    resp = httpx.get(f"{mock_url}/mock/requests", timeout=10.0)
+    resp = httpx.get(f"{mock_url}/mock/requests", params={"key": model}, timeout=10.0)
     resp.raise_for_status()
     names: set[str] = set()
     for req in resp.json().get("requests", []):
@@ -181,15 +184,17 @@ def _advertised_tool_names(mock_url: str) -> set[str]:
     return names
 
 
-def _wait_for_advertised_tools(mock_url: str, *, timeout: float = 60.0) -> set[str]:
+def _wait_for_advertised_tools(mock_url: str, model: str, *, timeout: float = 60.0) -> set[str]:
     """Poll the mock until a request carrying a tool surface is captured.
 
     The harness sends the model's available tools on the FIRST LLM
     request of the turn, before any tool is dispatched — so this settles
     on both the broken and the fixed build (it does not depend on the
-    forbidden tool call succeeding).
+    forbidden tool call succeeding). Only requests routed to this
+    test's unique ``model`` key are considered.
 
     :param mock_url: Mock LLM base URL.
+    :param model: Unique model id baked into this test's spec.
     :param timeout: Max seconds to wait.
     :returns: The union of advertised tool names once any appear.
     :raises AssertionError: If no tool surface is advertised in time.
@@ -197,7 +202,7 @@ def _wait_for_advertised_tools(mock_url: str, *, timeout: float = 60.0) -> set[s
     deadline = time.monotonic() + timeout
     names: set[str] = set()
     while time.monotonic() < deadline:
-        names = _advertised_tool_names(mock_url)
+        names = _advertised_tool_names(mock_url, model)
         if names:
             return names
         time.sleep(0.5)
@@ -292,7 +297,7 @@ def test_sidecar_mcp_allowlist_excludes_forbidden_tool(
         # Read the tool surface the harness sent the model (captured on the
         # first LLM request, before any dispatch) — deterministic on both
         # the broken and the fixed build.
-        advertised = _wait_for_advertised_tools(mock_llm_server_url, timeout=60.0)
+        advertised = _wait_for_advertised_tools(mock_llm_server_url, model, timeout=60.0)
         assert "probe__echo" in advertised, (
             f"Sanity check failed: the allow-listed ``echo`` tool should be "
             f"advertised to the model, but the advertised tools were: {advertised!r}"
